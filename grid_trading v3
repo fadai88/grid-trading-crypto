@@ -1,0 +1,419 @@
+import pandas as pd
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Dict
+import matplotlib.pyplot as plt
+import requests
+import json
+import datetime as dt
+
+@dataclass
+class Position:
+    entry_price: float
+    size: float
+    level: int
+    sell_target: float
+
+class TradingStrategy:
+    def __init__(self, initial_cash=14300, debug=True):
+        self.levels = [
+            {'buy_pct': 0.04, 'sell_pct': 0.03, 'next_buy_pct': 0.06},  # Level 0
+            {'buy_pct': 0.06, 'sell_pct': 0.04, 'next_buy_pct': 0.08},  # Level 1
+            {'buy_pct': 0.08, 'sell_pct': 0.06, 'next_buy_pct': 0.10},  # Level 2
+            {'buy_pct': 0.10, 'sell_pct': 0.07, 'next_buy_pct': 0.04},  # Level 3
+            {'buy_pct': 0.04, 'sell_pct': 0.03, 'next_buy_pct': 0.06},  # Level 4
+            {'buy_pct': 0.06, 'sell_pct': 0.04, 'next_buy_pct': 0.08},  # Level 5
+            {'buy_pct': 0.08, 'sell_pct': 0.06, 'next_buy_pct': 0.10},  # Level 6
+            {'buy_pct': 0.10, 'sell_pct': 0.07, 'next_buy_pct': 0.15},  # Level 7
+            {'buy_pct': 0.15, 'sell_pct': 0.08, 'next_buy_pct': 0.20},  # Level 8
+            {'buy_pct': 0.20, 'sell_pct': 0.09, 'next_buy_pct': 0.30},  # Level 9
+            {'buy_pct': 0.30, 'sell_pct': 0.10, 'next_buy_pct': None},  # Level 10
+        ]
+        # Define initial investment for each level
+        self.initial_investments = [
+            800,   # Level 0
+            900,   # Level 1
+            1000,  # Level 2
+            1100,  # Level 3
+            1200,  # Level 4
+            1300,  # Level 5
+            1400,  # Level 6
+            1500,  # Level 7
+            1600,  # Level 8
+            1700,  # Level 9
+            1800   # Level 10
+        ]
+        self.positions = []
+        self.cash = initial_cash
+        self.initial_cash = initial_cash
+        self.twenty_four_hr_high = 0
+        self.current_level = 0
+        self.pending_buy_order = None
+        self.pending_sell_orders = {}
+        self.debug = debug
+        self.trades_history = []
+        self.pending_orders: Dict[int, float] = {}
+        
+    def log(self, message: str):
+        if self.debug:
+            print(message)
+
+    def place_buy_order(self, level: int, current_price: float):
+        buy_price = current_price * (1 - self.levels[level]['buy_pct'])
+        self.pending_orders[level] = buy_price
+        #self.log(f"Placed buy order for level {level} at {buy_price:.2f}")
+        return buy_price
+
+    def execute_buy(self, level: int, order_price: float):
+        investment = self.initial_investments[level]
+        if self.cash >= investment:
+            position_size = investment / order_price  # Use the limit order price
+            sell_target = order_price * (1 + self.levels[level]['sell_pct'])
+            
+            self.positions.append(Position(order_price, position_size, level, sell_target))
+            self.cash -= investment
+            
+            self.trades_history.append({
+                'type': 'BUY',
+                'level': level,
+                'price': order_price,  # Use the limit order price
+                'size': position_size,
+                'cash_used': investment
+            })
+            
+            # self.log(f"Executed buy at level {level}: Price=${order_price:.2f}, Size={position_size:.4f}")
+            return True
+        return False
+
+    def check_buy_signals(self, current_price: float):
+        """Check for buy signals and execute at limit prices"""
+        for level, limit_price in list(self.pending_orders.items()):
+            if current_price <= limit_price:
+                # Execute at the limit price, not the current price
+                if self.execute_buy(level, limit_price):
+                    del self.pending_orders[level]
+                    # If this was level 0-10, place next level's order
+                    if level < len(self.levels) - 1:
+                        self.place_buy_order(level + 1, limit_price)
+
+    def execute_sell(self, position: Position, price: float):
+        """Execute a sell order for the given position"""
+        sale_proceeds = position.size * price
+        self.cash += sale_proceeds
+        
+        self.trades_history.append({
+            'type': 'SELL',
+            'level': position.level,
+            'price': price,
+            'size': position.size,
+            'cash_received': sale_proceeds,
+            'profit': sale_proceeds - (position.size * position.entry_price)
+        })
+        
+        #self.log(f"Executed sell at level {position.level}: Price=${price:.2f}, Profit=${sale_proceeds - (position.size * position.entry_price):.2f}")
+
+    def update_24hr_high(self, price: float):
+        if price > self.twenty_four_hr_high * 1.02:
+            self.twenty_four_hr_high = price
+            self.log(f"New 24hr high: {price:.2f}")
+            # Update level 0 buy order
+            self.place_buy_order(0, price)
+    
+    def calculate_performance_metrics(self, results: pd.DataFrame):
+        # Ensure we have a proper datetime index
+        if not isinstance(results.index, pd.DatetimeIndex):
+            results.index = pd.to_datetime(results.index)
+        
+        initial_value = self.initial_cash
+        final_value = results['portfolio_value'].iloc[-1]
+        
+        # Calculate total return
+        total_return = ((final_value - initial_value) / initial_value) * 100
+        
+        # Calculate time period
+        start_date = results.index[0]
+        end_date = results.index[-1]
+        
+        # Calculate total days and years
+        total_days = (end_date - start_date).total_seconds() / (24 * 60 * 60)
+        years = total_days / 365.25
+        
+        # Print debug information
+        print(f"Debug: Start date: {start_date}")
+        print(f"Debug: End date: {end_date}")
+        print(f"Debug: Total days: {total_days}")
+        print(f"Debug: Years: {years}")
+        
+        # Calculate annualized return
+        if years > 0:
+            annualized_return = (((final_value / initial_value) ** (1/years)) - 1) * 100
+        else:
+            annualized_return = total_return
+        
+        # Calculate drawdown
+        rolling_max = results['portfolio_value'].expanding().max()
+        drawdowns = (results['portfolio_value'] - rolling_max) / rolling_max * 100
+        max_drawdown = drawdowns.min()
+        
+        # Calculate drawdown periods
+        is_drawdown = results['portfolio_value'] < rolling_max
+        drawdown_periods = is_drawdown.astype(int).diff()
+        drawdown_starts = results.index[drawdown_periods == 1]
+        drawdown_ends = results.index[drawdown_periods == -1]
+        
+        # Calculate longest drawdown
+        longest_drawdown_days = 0
+        if len(drawdown_starts) > 0 and len(drawdown_ends) > 0:
+            drawdown_lengths = [(end - start).total_seconds() / (24 * 60 * 60)
+                              for start, end in zip(drawdown_starts, drawdown_ends)]
+            longest_drawdown_days = int(max(drawdown_lengths)) if drawdown_lengths else 0
+        
+        return {
+            'total_return': total_return,
+            'annualized_return': annualized_return,
+            'max_drawdown': max_drawdown,
+            'longest_drawdown_days': longest_drawdown_days,
+            'total_days': int(total_days),
+            'sharpe_ratio': self.calculate_sharpe_ratio(results),
+            'profit_factor': self.calculate_profit_factor()
+        }
+
+    # Also update the backtest method to ensure proper datetime handling:
+    
+    def backtest(self, price_data: pd.DataFrame):
+        price_data = price_data.astype(float)
+        
+        if not isinstance(price_data.index, pd.DatetimeIndex):
+            price_data.index = pd.to_datetime(price_data.index)
+        
+        price_data = price_data.sort_index()
+        self.log("\nStarting backtest...")
+        
+        # Initialize first orders
+        first_price = float(price_data['c'].iloc[0])  # Use close for initial price
+        self.twenty_four_hr_high = first_price
+        self.place_buy_order(0, first_price)
+        
+        portfolio_values = []
+        
+        for timestamp, row in price_data.iterrows():
+            current_close = float(row['c'])
+            current_high = float(row['h'])
+            current_low = float(row['l'])
+            
+            # Check if price has risen by 2%
+            if current_high > self.twenty_four_hr_high * 1.02:
+                self.twenty_four_hr_high = current_high
+                # Update level 0 buy order
+                self.place_buy_order(0, current_high)
+            
+            # Check sell signals first (using HIGH prices)
+            for pos in self.positions[:]:
+                if current_high >= pos.sell_target:
+                    # Execute sell at the target price
+                    self.execute_sell(pos, pos.sell_target)
+                    self.positions.remove(pos)
+                    # Place new buy order for level 0
+                    self.place_buy_order(0, current_high)
+            
+            # Check buy signals (using LOW prices)
+            for level, limit_price in list(self.pending_orders.items()):
+                if current_low <= limit_price:
+                    # Execute at the limit price
+                    if self.execute_buy(level, limit_price):
+                        del self.pending_orders[level]
+                        # Cancel any existing sell orders
+                        self.pending_sell_orders.clear()
+                        # Place new sell order
+                        sell_target = limit_price * (1 + self.levels[level]['sell_pct'])
+                        self.pending_sell_orders[limit_price] = sell_target
+                        # Place next buy order if not at max level
+                        if level < len(self.levels) - 1:
+                            next_buy_price = limit_price * (1 - self.levels[level]['next_buy_pct'])
+                            self.pending_orders[level + 1] = next_buy_price
+            
+            # Calculate portfolio value using close price
+            portfolio_value = self.cash + sum(pos.size * current_close for pos in self.positions)
+            portfolio_values.append({
+                'timestamp': timestamp,
+                'portfolio_value': portfolio_value,
+                'price': current_close,
+                'high': current_high,
+                'low': current_low,
+                'active_positions': len(self.positions),
+                'pending_orders': len(self.pending_orders),
+                'cash': self.cash
+            })
+        
+        results = pd.DataFrame(portfolio_values)
+        results.set_index('timestamp', inplace=True)
+        return results
+
+    def calculate_sharpe_ratio(self, results: pd.DataFrame, risk_free_rate=0.02):
+        """Calculate Sharpe Ratio using daily returns"""
+        daily_returns = results['portfolio_value'].pct_change()
+        excess_returns = daily_returns - risk_free_rate/365
+        if len(excess_returns) > 1:
+            sharpe_ratio = np.sqrt(365) * (excess_returns.mean() / excess_returns.std())
+            return sharpe_ratio
+        return 0
+    
+    def calculate_profit_factor(self):
+        """Calculate profit factor (gross profits / gross losses)"""
+        profits = [trade['profit'] for trade in self.trades_history if 'profit' in trade]
+        if not profits:
+            return 0
+        
+        gross_profits = sum(p for p in profits if p > 0)
+        gross_losses = abs(sum(p for p in profits if p < 0))
+        
+        return gross_profits / gross_losses if gross_losses != 0 else float('inf')
+    
+    # Update the print_summary method:
+    
+    def print_summary(self, results: pd.DataFrame):
+        metrics = self.calculate_performance_metrics(results)
+        
+        print("\n=== Trading Summary ===")
+        print(f"Initial Portfolio: ${self.initial_cash:,.2f}")
+        final_value = results['portfolio_value'].iloc[-1]
+        print(f"Final Portfolio: ${final_value:,.2f}")
+        
+        print(f"\nPerformance Metrics:")
+        print(f"Total Return: {metrics['total_return']:.2f}%")
+        print(f"Annualized Return: {metrics['annualized_return']:.2f}%")
+        print(f"Maximum Drawdown: {metrics['max_drawdown']:.2f}%")
+        print(f"Longest Drawdown Period: {metrics['longest_drawdown_days']} days")
+        print(f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}")
+        print(f"Profit Factor: {metrics['profit_factor']:.2f}")
+        
+        print(f"\nTrading Statistics:")
+        print(f"Total Trading Days: {metrics['total_days']}")
+        print(f"Total Trades: {len(self.trades_history)}")
+        print(f"Active Positions: {len(self.positions)}")
+        print(f"Pending Orders: {len(self.pending_orders)}")
+        
+        if self.trades_history:
+            profits = [trade['profit'] for trade in self.trades_history if 'profit' in trade]
+            if profits:
+                print(f"Total Profit/Loss: ${sum(profits):,.2f}")
+                winning_trades = len([p for p in profits if p > 0])
+                total_trades = len(profits)
+                win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+                print(f"Win Rate: {win_rate:.1f}% ({winning_trades}/{total_trades})")
+        
+        print("\nCurrent Positions:")
+        for pos in self.positions:
+            print(f"Level {pos.level}: Entry=${pos.entry_price:.2f}, Target=${pos.sell_target:.2f}")
+        
+        print("\nPending Orders:")
+        for level, price in sorted(self.pending_orders.items()):
+            print(f"Level {level}: ${price:.2f}")
+    
+    # Add a new plotting method for drawdown visualization:
+    
+    def plot_metrics(self, results: pd.DataFrame):
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), gridspec_kw={'height_ratios': [2, 1]})
+        
+        # Plot price and portfolio value
+        ax1.plot(results.index, results['portfolio_value'], label='Portfolio Value')
+        ax1.plot(results.index, results['price'], label='ETH Price', alpha=0.6)
+        ax1.set_title('ETH Trading Strategy Performance')
+        ax1.set_xlabel('Date')
+        ax1.set_ylabel('Value ($)')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # Calculate and plot drawdown
+        rolling_max = results['portfolio_value'].expanding().max()
+        drawdown = (results['portfolio_value'] - rolling_max) / rolling_max * 100
+        
+        ax2.fill_between(results.index, drawdown, 0, color='red', alpha=0.3)
+        ax2.set_title('Portfolio Drawdown')
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('Drawdown (%)')
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        plt.show()
+
+    def place_next_buy_order(self, entry_price: float):
+        """Place next buy order based on current level's next_buy_pct"""
+        if self.current_level >= len(self.levels) - 1:  # No more levels after this
+            return None
+        
+        next_buy_pct = self.levels[self.current_level]['next_buy_pct']
+        next_buy_price = entry_price * (1 - next_buy_pct)
+        self.pending_buy_order = next_buy_price
+        self.log(f"Placed next buy order for level {self.current_level + 1} at {next_buy_price:.2f}")
+        return next_buy_price
+
+
+# import data
+def create_df(coin):
+    pair = "USDT"
+    root_url = 'https://api.binance.com/api/v3/klines'
+    interval = '1d'
+    
+    start_date = int(dt.datetime(2021, 1, 1).timestamp() * 1000)
+    end_date = int(dt.datetime.now().timestamp() * 1000)
+    
+    url = (f'{root_url}?symbol={coin}{pair}&interval={interval}'
+           f'&startTime={start_date}&endTime={end_date}&limit=1000')
+    
+    all_data = []
+    
+    while start_date < end_date:
+        data = json.loads(requests.get(url).text)
+        if 'msg' in data:
+            break
+        if not data:
+            break
+        
+        all_data.extend(data)
+        start_date = int(data[-1][0]) + 1
+        url = (f'{root_url}?symbol={coin}{pair}&interval={interval}'
+               f'&startTime={start_date}&endTime={end_date}&limit=1000')
+    
+    df = pd.DataFrame(all_data)
+    df.columns = ['open_time',
+                  'o', 'h', 'l', 'c', 'v',
+                  'close_time', 'qav', 'num_trades',
+                  'taker_base_vol', 'taker_quote_vol', 'ignore']
+    
+    # Convert price columns to float explicitly
+    for col in ['o', 'h', 'l', 'c']:
+        df[col] = df[col].astype(float)
+    
+    df.index = [dt.datetime.fromtimestamp(x/1000.0) for x in df.close_time]
+    return df[['o', 'h', 'l', 'c']]
+coin = 'ETH'
+prices = create_df(coin)
+
+strategy = TradingStrategy(initial_cash=14300, debug=True)
+results = strategy.backtest(prices)
+strategy.print_summary(results)
+strategy.plot_metrics(results)
+
+# Let's print first few trades that should happen based on initial price
+initial_price = float(prices['c'].iloc[0])  # Convert to float
+print(f"Initial price: ${initial_price:.2f}")
+print("\nExpected initial orders:")
+print(f"Level 0 buy order: ${initial_price * (1-0.04):.2f}")  # Should be around $699.75
+print(f"Level 0 sell target if filled: ${initial_price * (1-0.04) * (1+0.03):.2f}")  # Should be around $720.74
+
+# Run backtest
+results = strategy.backtest(prices)
+
+
+# Plot results including trade executions
+plt.figure(figsize=(15, 8))
+plt.figure(figsize=(15, 8))
+plt.plot(results.index, results['portfolio_value'], label='Portfolio Value')
+plt.plot(results.index, results['price'], label='ETH Price', alpha=0.6)
+plt.title('ETH Trading Strategy Performance')
+plt.xlabel('Date')
+plt.ylabel('Value ($)')
+plt.legend()
+plt.grid(True)
+plt.show()
